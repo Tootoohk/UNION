@@ -1,0 +1,41 @@
+// 保存已点击按钮的集合
+const clickedBtns = new Set();
+let confirmCount = 0;
+
+// 自动点击所有含“确认”字样的按钮
+function tryClickConfirmBtn(nodeList) {
+    nodeList.forEach(node => {
+        if (node.nodeType !== 1) return;
+        // 查找所有button
+        const btns = node.matches?.('button') ? [node] : node.querySelectorAll?.('button') || [];
+        btns.forEach(btn => {
+            // 查找所有div，文本为“确认”
+            const confirmDivs = btn.querySelectorAll('div');
+            for (const div of confirmDivs) {
+                if (
+                    div.innerText.trim() === '确认' &&
+                    !clickedBtns.has(btn)
+                ) {
+                    btn.click();
+                    clickedBtns.add(btn);
+                    confirmCount++;
+                    console.log(`已完成 ${confirmCount} 次交易`);
+                    break;
+                }
+            }
+        });
+    });
+}
+
+// 页面初始检测一次
+tryClickConfirmBtn(document.querySelectorAll('button'));
+
+// 监听DOM新增
+const observer = new MutationObserver(mutations => {
+    mutations.forEach(mutation => {
+        if (mutation.addedNodes.length > 0) {
+            tryClickConfirmBtn(mutation.addedNodes);
+        }
+    });
+});
+observer.observe(document.body, { childList: true, subtree: true });
