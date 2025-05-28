@@ -1,0 +1,393 @@
+// ==UserScript==
+// @name         Union Auto Transfer Bot (计数修正版)
+// @namespace    https://app.union.build/
+// @version      1.2.1
+// @description  自动化跨链转账，计数更健壮，异常恢复，10分钟自动刷新。仅 https://app.union.build/transfer 生效。
+// @match        https://app.union.build/transfer
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ========== 计数器 ==========
+    const COUNTER_KEY = "union_auto_transfer_count";
+    function getTransferCount() {
+        return parseInt(localStorage.getItem(COUNTER_KEY) || "0", 10);
+    }
+    function incTransferCount() {
+        let count = getTransferCount() + 1;
+        localStorage.setItem(COUNTER_KEY, count);
+        updateCounterDisplay(count);
+    }
+    function updateCounterDisplay(count) {
+        let el = document.getElementById("union-transfer-counter");
+        if (!el) {
+            el = document.createElement("div");
+            el.id = "union-transfer-counter";
+            el.style.cssText = `
+                position: fixed; top: 18px; right: 18px; z-index: 9999;
+                background: rgba(36, 200, 235, .96); color: #222; font-weight: bold; 
+                font-size: 15px; border-radius: 10px; box-shadow: 0 2px 12px #0002; 
+                padding: 10px 26px; border: 2px solid #fff; opacity: 0.93; 
+                transition: background 0.3s;
+            `;
+            document.body.appendChild(el);
+        }
+        el.textContent = `总自动交易次数：${count}`;
+    }
+    // 页面加载时立即显示
+    window.addEventListener('DOMContentLoaded', () => {
+        updateCounterDisplay(getTransferCount());
+    });
+
+    // ========== 工具函数 ==========
+    async function waitForElement(query, filter = null, timeout = 12000, interval = 800) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+            let elements = Array.from(document.querySelectorAll(query));
+            if (typeof filter === "function") elements = elements.filter(filter);
+            if (elements.length) return elements[0];
+            await new Promise(res => setTimeout(res, interval));
+        }
+        return null;
+    }
+
+    function waitForElementByMutation(container, selector, filter = null, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+            let timer = setTimeout(() => {
+                observer.disconnect();
+                reject('Timeout');
+            }, timeout);
+
+            function match() {
+                let elements = Array.from(container.querySelectorAll(selector));
+                if (typeof filter === "function") elements = elements.filter(filter);
+                if (elements.length) {
+                    clearTimeout(timer);
+                    observer.disconnect();
+                    resolve(elements[0]);
+                    return true;
+                }
+                return false;
+            }
+            if (match()) return;
+            const observer = new MutationObserver(() => match());
+            observer.observe(container, { childList: true, subtree: true });
+        });
+    }
+
+    function getSelectButtonByLabel(labelText) {
+        const labels = Array.from(document.querySelectorAll('label.uppercase.text-zinc-500'));
+        const targetLabel = labels.find(lab =>
+            lab.textContent.trim().toLowerCase().includes(labelText.toLowerCase())
+        );
+        if (!targetLabel) return null;
+        let current = targetLabel;
+        while (current && !(current.classList && current.classList.contains('w-full'))) {
+            current = current.parentElement;
+        }
+        if (!current) return null;
+        return current.querySelector('button.w-full.h-14');
+    }
+
+    function isChainCardSelected(boxLabel, symbol, networkName) {
+        const btn = getSelectButtonByLabel(boxLabel);
+        if (!btn) return false;
+        const cards = btn.parentElement.querySelectorAll('.flex.gap-2.items-center.justify-between.p-3.flex-1.w-full');
+        for (let card of cards) {
+            const ps = card.querySelectorAll('p');
+            if (
+                ps.length >= 2 &&
+                ps[0].textContent.trim() === symbol &&
+                ps[1].textContent.trim() === networkName
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    async function clickAndSelectNetwork(labelText, networkName, logoUrlKeyword, timeout = 10000) {
+        const selectBtn = getSelectButtonByLabel(labelText);
+        if (!selectBtn) throw new Error(`找不到${labelText}选择框`);
+        selectBtn.click();
+        await new Promise(res => setTimeout(res, 350));
+        const grid = await waitForElement('.p-4.grid.grid-cols-3', null, timeout);
+        if (!grid) throw new Error('链选择弹窗未弹出');
+        const btn = Array.from(grid.querySelectorAll('button')).find(btn => {
+            const img = btn.querySelector('img');
+            const span = btn.querySelector('span.text-xs');
+            return img && img.src.includes(logoUrlKeyword) && span && span.textContent.trim() === networkName;
+        });
+        if (!btn) throw new Error('弹窗中找不到目标链');
+        btn.click();
+        await new Promise(res => setTimeout(res, 500));
+    }
+
+    async function waitAndClickAssetCard(symbol, logoUrlKeyword, timeout = 12000) {
+        const cardBtn = await waitForElement(
+            'button.flex.flex-col.items-start.w-full',
+            btn => {
+                const img = btn.querySelector('img');
+                const spans = btn.querySelectorAll('span');
+                return img && img.src.includes(logoUrlKeyword) && Array.from(spans).some(s => s.textContent.trim() === symbol);
+            },
+            timeout
+        );
+        if (cardBtn) {
+            await new Promise(res => setTimeout(res, 800)); // 延长等待时间
+            cardBtn.click();
+            await new Promise(res => setTimeout(res, 800));
+            return true;
+        }
+        return false;
+    }
+
+    async function inputAmount(value) {
+        const input = await waitForElement('input#amount', null, 6000);
+        if (input && !input.disabled) {
+            input.value = value;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            await new Promise(res => setTimeout(res, 400));
+            return true;
+        }
+        return false;
+    }
+
+    async function clickButtonByTextAndClassPart(text, classPart, timeout = 20000) {
+        const btn = await waitForElement(
+            'button',
+            el => el.textContent.trim().toLowerCase().includes(text.toLowerCase()) &&
+                el.className.includes(classPart),
+            timeout
+        );
+        if (btn) {
+            btn.click();
+            await new Promise(res => setTimeout(res, 1400));
+            return true;
+        }
+        return false;
+    }
+    async function clickButtonByTextOnly(text, timeout = 20000) {
+        const btn = await waitForElement(
+            'button',
+            el => el.textContent.trim().toLowerCase() === text.toLowerCase(),
+            timeout
+        );
+        if (btn) {
+            btn.click();
+            await new Promise(res => setTimeout(res, 1200));
+            return true;
+        }
+        return false;
+    }
+    async function clickNewTransfer(timeout = 20000) {
+        let clicked = false;
+        // 在点击之前就加一次计数，避免意外未跳转
+        incTransferCount();
+        clicked = await clickButtonByTextAndClassPart('new transfer', 'border-zinc-200', timeout);
+        if (!clicked) clicked = await clickButtonByTextOnly('new transfer', timeout);
+        return clicked;
+    }
+
+    async function tryClickNewTransferOnSuccess(timeout = 2000) {
+        const success = document.querySelector('h3.text-xl.font-bold.mb-1.text-zinc-400');
+        const isSuccess = success && /transfer successful/i.test(success.textContent);
+        const btn = Array.from(document.querySelectorAll('button')).find(b =>
+            b.textContent.trim().toLowerCase().includes('new transfer')
+        );
+        if (isSuccess && btn) {
+            incTransferCount();
+            btn.click();
+            await new Promise(res => setTimeout(res, timeout));
+            return true;
+        }
+        return false;
+    }
+
+    async function tryClickTransferOnRedError(timeout = 2000) {
+        const errorBtn = Array.from(document.querySelectorAll('button.bg-red-500')).find(b => {
+            const txt = b.textContent.trim().toLowerCase();
+            return (
+                txt.includes('could not create orders') ||
+                txt.includes('failed checking allowance') ||
+                txt.includes('failed to check cosmos balance') ||
+                txt.includes('failed to execute contract') ||
+                txt.includes('failed')
+            );
+        });
+        if (errorBtn) {
+            const transferMenu = Array.from(document.querySelectorAll('a')).find(a =>
+                a.getAttribute('href') === '/transfer' && /transfer/i.test(a.textContent)
+            );
+            if (transferMenu) {
+                transferMenu.click();
+                await new Promise(res => setTimeout(res, timeout));
+                await waitForElement('label.uppercase.text-zinc-500', lab => /source/i.test(lab.textContent), 12000);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    async function tryClickTryAgainOnContractError(timeout = 2000) {
+        const errorBlock = Array.from(document.querySelectorAll('div.p-4.rounded.bg-zinc-925')).find(div =>
+            div.textContent && div.textContent.toLowerCase().includes("failed to execute contract")
+        );
+        if (errorBlock) {
+            const tryAgainBtn = Array.from(errorBlock.querySelectorAll('button')).find(btn =>
+                btn.textContent.trim().toLowerCase().includes("try again")
+            );
+            if (tryAgainBtn) {
+                tryAgainBtn.click();
+                await new Promise(res => setTimeout(res, timeout));
+                return true;
+            }
+        }
+        const tryAgainBtn = Array.from(document.querySelectorAll('button')).find(btn =>
+            btn.textContent.trim().toLowerCase().includes("try again")
+        );
+        if (tryAgainBtn) {
+            tryAgainBtn.click();
+            await new Promise(res => setTimeout(res, timeout));
+            return true;
+        }
+        return false;
+    }
+
+    async function clickTransferMenu() {
+        const transferMenu = Array.from(document.querySelectorAll('a')).find(a =>
+            a.getAttribute('href') === '/transfer' && /transfer/i.test(a.textContent)
+        );
+        if (transferMenu) {
+            transferMenu.click();
+            await new Promise(res => setTimeout(res, 3000));
+            return true;
+        }
+        return false;
+    }
+
+    // ========== 主循环 ==========
+    let errorCount = 0, stepCount = 0;
+
+    async function mainLoop() {
+        const mainSymbol = "XION";
+        const sourceNetworkName = "Xion Testnet";
+        const sourceLogo = "XION.svg";
+        const destNetworkName = "Babylon Testnet";
+        const destLogo = "BABYLON.svg";
+        const amountText = "0.001";
+        const REFRESH_ROUND = 60; // 每60次刷新页面
+
+        while (true) {
+            try {
+                if (await tryClickTransferOnRedError()) {
+                    console.log("[自动化] 检测到关键红色报错，已点击 Transfer 菜单，重启流程。");
+                    await new Promise(res => setTimeout(res, 2000));
+                    continue;
+                }
+                if (await tryClickTryAgainOnContractError()) {
+                    console.log("[自动化] 检测到合约执行失败弹窗，已点击 Try Again 按钮。");
+                    await new Promise(res => setTimeout(res, 2000));
+                    continue;
+                }
+                if (await tryClickNewTransferOnSuccess()) {
+                    console.log("[自动化] 检测到转账成功界面，已自动点击 New transfer。");
+                    await new Promise(res => setTimeout(res, 1800));
+                    continue;
+                }
+
+                if (!isChainCardSelected("source", mainSymbol, sourceNetworkName)) {
+                    console.log("[自动化] 正在选择 Source...");
+                    await clickAndSelectNetwork("source", sourceNetworkName, sourceLogo, 10000);
+                    await waitAndClickAssetCard(mainSymbol, "XION.png", 12000);
+                    await waitForElementByMutation(
+                        getSelectButtonByLabel("source").parentElement,
+                        '.flex.gap-2.items-center.justify-between.p-3.flex-1.w-full',
+                        card => {
+                            const ps = card.querySelectorAll('p');
+                            return ps.length >= 2 &&
+                                ps[0].textContent.trim() === mainSymbol &&
+                                ps[1].textContent.trim() === sourceNetworkName;
+                        },
+                        10000
+                    );
+                    await new Promise(res => setTimeout(res, 600));
+                    continue;
+                }
+                if (!isChainCardSelected("destination", mainSymbol, destNetworkName)) {
+                    console.log("[自动化] 正在选择 Destination...");
+                    await clickAndSelectNetwork("destination", destNetworkName, destLogo, 10000);
+                    await waitForElementByMutation(
+                        getSelectButtonByLabel("destination").parentElement,
+                        '.flex.gap-2.items-center.justify-between.p-3.flex-1.w-full',
+                        card => {
+                            const ps = card.querySelectorAll('p');
+                            return ps.length >= 2 &&
+                                ps[0].textContent.trim() === mainSymbol &&
+                                ps[1].textContent.trim() === destNetworkName;
+                        },
+                        10000
+                    );
+                    await new Promise(res => setTimeout(res, 600));
+                    continue;
+                }
+
+                console.log("[自动化] 开始转账操作...");
+                await inputAmount(amountText);
+                await clickButtonByTextAndClassPart('transfer ready', 'bg-sky-600', 20000);
+                await clickButtonByTextAndClassPart('submit', 'bg-sky-600', 20000);
+                await clickNewTransfer(20000);
+
+                await new Promise(res => setTimeout(res, 2500));
+                errorCount = 0;
+            } catch (e) {
+                errorCount += 1;
+                console.error("自动脚本异常：", e);
+                await new Promise(res => setTimeout(res, 2000));
+                if (errorCount >= 5) {
+                    console.warn("异常次数达到5次，自动点击 Transfer 菜单重启流程...");
+                    await clickTransferMenu();
+                    errorCount = 0;
+                    await new Promise(res => setTimeout(res, 4000));
+                }
+            }
+            await new Promise(res => setTimeout(res, 2000));
+            stepCount++;
+            if (stepCount % REFRESH_ROUND === 0) { // 60轮约10分钟自动刷新
+                console.log(`[自动化] 已运行${stepCount}轮，自动刷新页面释放内存`);
+                location.reload();
+                await new Promise(res => setTimeout(res, 10000));
+            }
+            // 每轮都实时刷新计数器显示
+            updateCounterDisplay(getTransferCount());
+        }
+    }
+
+    // ==== 兼容 SPA 单页跳转，每次进入 /transfer 都会自动触发 ====
+    let started = false;
+    function safeStart() {
+        if (started) return;
+        started = true;
+        updateCounterDisplay(getTransferCount());
+        setTimeout(mainLoop, 1500);
+    }
+
+    // 首次页面加载
+    if (window.location.pathname === '/transfer') safeStart();
+    // 防止 SPA 跳转时脚本失效
+    setInterval(() => {
+        if (window.location.pathname === '/transfer' && !started) {
+            safeStart();
+        }
+    }, 1200);
+
+    // 每10分钟主动刷新一次页面（保险）
+    setInterval(() => {
+        if (window.location.pathname === '/transfer') {
+            location.reload();
+        }
+    }, 10 * 60 * 1000);
+
+})();
