@@ -3,7 +3,7 @@
 // @namespace    https://app.union.build/
 // @version      1.2.1
 // @description  自动化跨链转账，计数更健壮，异常恢复，10分钟自动刷新。仅 https://app.union.build/transfer 生效。
-// @match        https://app.union.build/transfer
+// @match        https://app.union.build/transfer*
 // @grant        none
 // ==/UserScript==
 
