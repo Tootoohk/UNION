@@ -1,0 +1,238 @@
+// ==UserScript==
+// @name         Union Auto Transfer Bot (Direct Params + AutoJump)
+// @namespace    https://app.union.build/
+// @version      2.1.0
+// @description  自动跳转参数页面，自动填金额、提交、异常重试与统计。CORN-SEI演示
+// @match        https://app.union.build/transfer*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ====== 配置 ======
+    const AUTO_URL = "https://app.union.build/transfer?source=bbn-test-5&destination=xion-testnet-2&asset=0x7562626e";
+    const AMOUNT = "0.000001";
+    const COUNTER_KEY = "union_auto_transfer_babylon-xion"; // 独立计数
+    const MAX_ERROR_COUNT = 5;
+    const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+
+    // ====== 自动跳转到带参数页面 ======
+    if (
+        window.location.pathname === "/transfer" &&
+        window.location.search !== AUTO_URL.replace(/^.*\?/, '?')
+    ) {
+        window.location.replace(AUTO_URL);
+        return; // 跳转后本页脚本不再执行
+    }
+
+    // ====== 交易计数 ======
+    function getTransferCount() {
+        return parseInt(localStorage.getItem(COUNTER_KEY) || "0", 10);
+    }
+    function incTransferCount() {
+        let count = getTransferCount() + 1;
+        localStorage.setItem(COUNTER_KEY, count);
+        updateCounterDisplay(count);
+    }
+    function updateCounterDisplay(count) {
+        let el = document.getElementById("union-transfer-counter");
+        if (!el) {
+            el = document.createElement("div");
+            el.id = "union-transfer-counter";
+            el.style.cssText = `
+                position: fixed; top: 18px; right: 18px; z-index: 9999;
+                background: rgba(36, 200, 235, .96); color: #222; font-weight: bold;
+                font-size: 15px; border-radius: 10px; box-shadow: 0 2px 12px #0002;
+                padding: 10px 26px; border: 2px solid #fff; opacity: 0.93;
+            `;
+            document.body.appendChild(el);
+        }
+        el.textContent = `总自动交易次数：${count}`;
+    }
+    window.addEventListener('DOMContentLoaded', () => {
+        updateCounterDisplay(getTransferCount());
+    });
+
+    // ====== 工具函数 ======
+    async function waitForElement(selector, filter = null, timeout = 12000, interval = 700) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+            let elements = Array.from(document.querySelectorAll(selector));
+            if (typeof filter === "function") elements = elements.filter(filter);
+            if (elements.length) return elements[0];
+            await new Promise(res => setTimeout(res, interval));
+        }
+        return null;
+    }
+    async function inputAmount(value) {
+        const input = await waitForElement('input#amount', null, 8000);
+        if (input && !input.disabled) {
+            input.value = value;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            await new Promise(res => setTimeout(res, 350));
+            return true;
+        }
+        return false;
+    }
+    async function clickButtonByTextAndClassPart(text, classPart, timeout = 15000) {
+        const btn = await waitForElement(
+            'button',
+            el => el.textContent.trim().toLowerCase().includes(text.toLowerCase()) &&
+                el.className.includes(classPart),
+            timeout
+        );
+        if (btn) {
+            btn.click();
+            await new Promise(res => setTimeout(res, 900));
+            return true;
+        }
+        return false;
+    }
+    async function clickButtonByTextOnly(text, timeout = 12000) {
+        const btn = await waitForElement(
+            'button',
+            el => el.textContent.trim().toLowerCase() === text.toLowerCase(),
+            timeout
+        );
+        if (btn) {
+            btn.click();
+            await new Promise(res => setTimeout(res, 900));
+            return true;
+        }
+        return false;
+    }
+    async function clickNewTransfer(timeout = 12000) {
+        incTransferCount();
+        let clicked = await clickButtonByTextAndClassPart('new transfer', 'border-zinc-200', timeout);
+        if (!clicked) clicked = await clickButtonByTextOnly('new transfer', timeout);
+        return clicked;
+    }
+
+    // 检查转账成功，点击新交易并计数
+    async function tryClickNewTransferOnSuccess(timeout = 1600) {
+        const success = document.querySelector('h3.text-xl.font-bold.mb-1.text-zinc-400');
+        const isSuccess = success && /transfer successful/i.test(success.textContent);
+        const btn = Array.from(document.querySelectorAll('button')).find(b =>
+            b.textContent.trim().toLowerCase().includes('new transfer')
+        );
+        if (isSuccess && btn) {
+            incTransferCount();
+            btn.click();
+            await new Promise(res => setTimeout(res, timeout));
+            return true;
+        }
+        return false;
+    }
+
+    // Try Again 处理
+    async function tryClickTryAgain(timeout = 1600) {
+        const tryAgainBtn = Array.from(document.querySelectorAll('button')).find(btn =>
+            btn.textContent.trim().toLowerCase().includes("try again")
+        );
+        if (tryAgainBtn) {
+            tryAgainBtn.click();
+            await new Promise(res => setTimeout(res, timeout));
+            return true;
+        }
+        return false;
+    }
+    // 红色报错处理
+    async function tryClickTransferOnRedError(timeout = 1800) {
+        const errorBtn = Array.from(document.querySelectorAll('button.bg-red-500')).find(b => {
+            const txt = b.textContent.trim().toLowerCase();
+            return (
+                txt.includes('could not create orders') ||
+                txt.includes('failed checking allowance') ||
+                txt.includes('failed to check cosmos balance') ||
+                txt.includes('failed to execute contract') ||
+                txt.includes('failed')
+            );
+        });
+        if (errorBtn) {
+            window.location.href = AUTO_URL;
+            await new Promise(res => setTimeout(res, timeout));
+            return true;
+        }
+        return false;
+    }
+
+    // 主循环
+    let errorCount = 0, stepCount = 0;
+    async function mainLoop() {
+        const REFRESH_ROUND = 60;
+        while (true) {
+            try {
+                // 处理各种异常和 Try Again
+                if (await tryClickTransferOnRedError()) {
+                    errorCount = 0;
+                    continue;
+                }
+                if (await tryClickTryAgain()) {
+                    errorCount++;
+                    await new Promise(res => setTimeout(res, 1000));
+                    if (errorCount >= MAX_ERROR_COUNT) {
+                        window.location.href = AUTO_URL;
+                        errorCount = 0;
+                        await new Promise(res => setTimeout(res, 3000));
+                    }
+                    continue;
+                }
+                if (await tryClickNewTransferOnSuccess()) {
+                    errorCount = 0;
+                    continue;
+                }
+
+                // 填金额
+                await inputAmount(AMOUNT);
+
+                // 按流程点击按钮
+                await clickButtonByTextAndClassPart('transfer ready', 'bg-sky-600', 10000);
+                await clickButtonByTextAndClassPart('submit', 'bg-sky-600', 10000);
+                await clickNewTransfer(12000);
+
+                await new Promise(res => setTimeout(res, 2000));
+                errorCount = 0;
+            } catch (e) {
+                errorCount++;
+                console.error("自动脚本异常：", e);
+                await new Promise(res => setTimeout(res, 1500));
+                if (errorCount >= MAX_ERROR_COUNT) {
+                    window.location.href = AUTO_URL;
+                    errorCount = 0;
+                    await new Promise(res => setTimeout(res, 3000));
+                }
+            }
+            await new Promise(res => setTimeout(res, 1700));
+            stepCount++;
+            if (stepCount % REFRESH_ROUND === 0) {
+                window.location.href = AUTO_URL;
+                await new Promise(res => setTimeout(res, 8000));
+            }
+            updateCounterDisplay(getTransferCount());
+        }
+    }
+
+    // ==== 兼容单页跳转，每次进入 transfer* 都会自动触发 ====
+    let started = false;
+    function safeStart() {
+        if (started) return;
+        started = true;
+        updateCounterDisplay(getTransferCount());
+        setTimeout(mainLoop, 1200);
+    }
+    if (window.location.pathname.startsWith('/transfer')) safeStart();
+    setInterval(() => {
+        if (window.location.pathname.startsWith('/transfer') && !started) {
+            safeStart();
+        }
+    }, 1000);
+
+    // 每10分钟主动刷新页面，进入带参数页面
+    setInterval(() => {
+        if (window.location.pathname.startsWith('/transfer')) {
+            window.location.href = AUTO_URL;
+        }
+    }, REFRESH_INTERVAL_MS);
+
+})();
