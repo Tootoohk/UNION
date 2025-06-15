@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Union Auto Transfer Bot (Direct Params + AutoJump)
+// @name         Union Auto Transfer Bot (BABYLON-XION)
 // @namespace    https://app.union.build/
-// @version      2.1.0
+// @version      2.1.1
 // @description  自动跳转参数页面，自动填金额、提交、异常重试与统计。CORN-SEI演示
 // @match        https://app.union.build/transfer*
 // @grant        none
@@ -150,6 +150,7 @@
             );
         });
         if (errorBtn) {
+            // 用 href 保证回到参数页面
             window.location.href = AUTO_URL;
             await new Promise(res => setTimeout(res, timeout));
             return true;
@@ -228,10 +229,10 @@
         }
     }, 1000);
 
-    // 每10分钟主动刷新页面，进入带参数页面
+    // 每10分钟主动强制刷新页面，释放内存
     setInterval(() => {
         if (window.location.pathname.startsWith('/transfer')) {
-            window.location.href = AUTO_URL;
+            window.location.reload();
         }
     }, REFRESH_INTERVAL_MS);
 
